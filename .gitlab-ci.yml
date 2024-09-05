@@ -1,0 +1,39 @@
+stages:
+  - build
+  - deploy
+
+# Build job for all branches
+build:
+  stage: build
+  image: docker:20.10.16
+  variables:
+    DOCKER_DRIVER: overlay2
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  services:
+    - docker:20.10.16-dind
+
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE:latest .
+    - docker tag $CI_REGISTRY_IMAGE:latest $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME
+
+# Deploy job for 'main' branch (production)
+deploy_production:
+  stage: deploy
+  image: alpine:latest
+  variables:
+    IP: "192.168.70.6"
+    USER: "root"
+  before_script:
+    - apk update && apk add openssh-client
+    - if [ -f "$ID_RSA" ]; then chmod og= $ID_RSA; fi
+  script:
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $USER@$IP "docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY"
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $USER@$IP "docker pull $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME"
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $USER@$IP "docker container rm -f website-preview || true"
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $USER@$IP "docker run -d -p 80:80 --restart=unless-stopped --name website-preview $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME"
+
+  only:
+    - main
