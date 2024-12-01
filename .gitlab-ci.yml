@@ -1,39 +1,59 @@
+### Variables
+variables:
+  DEPLOY_IP: "192.168.70.7"  # Dev deployment server IP
+  DEPLOY_USER: "gitlab-deployment"  # Deployment server SSH user
+  DEPLOY_PORT_HOST: 8080  # Host port
+  DEPLOY_PORT_CONT: 8080  # Container port
+  CONTAINER_NAME: "static-website-dev"  # Name of the deployed container
+
+
+### Stages
 stages:
   - build
   - deploy
 
 
-build:
+### Build Container Image
+build_image:
+  image: docker:stable
   stage: build
-  image: docker:20.10.16
-  variables:
-    DOCKER_DRIVER: overlay2
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
   services:
-    - docker:20.10.16-dind
-
+    - docker:dind
+  variables:
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    # Login to GitLab Container Registry using predefined CI/CD variables
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
   script:
-    - docker build -t $CI_REGISTRY_IMAGE:latest .
-    - docker tag $CI_REGISTRY_IMAGE:latest $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME
-    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
-    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME
+    # Build the Docker image from the Dockerfile in the current directory
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" .
+    # Push the built Docker image to the GitLab Container Registry
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+  rules: 
+    # Rule: Run this job only for dev branch and if the Dockerfile exists
+    - if: $CI_COMMIT_BRANCH == "dev"
+      exists:
+        - Dockerfile
 
-# Deploy job for dev branch
-deploy_development:
+
+### Deploy Container to Virtual Machine: # Dev Branch
+deploy_container:
   stage: deploy
   image: alpine:latest
-  variables:
-    IP: "192.168.70.7"
-    USER: "root"
   before_script:
+    # Update the package index, install the OpenSSH client for SSH connections
     - apk update && apk add openssh-client
+    # If the private SSH key file ($ID_RSA) exists, set secure permissions (read/write for the owner only)
     - if [ -f "$ID_RSA" ]; then chmod og= $ID_RSA; fi
   script:
-    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $USER@$IP "docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY"
-    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $USER@$IP "docker pull $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME"
-    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $USER@$IP "docker container rm -f website-preview || true"
-    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $USER@$IP "docker run -d -p 80:80 --restart=unless-stopped --name website-preview $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME"
-
-  only:
-    - dev
+    #  SSH into the deployment server, log in to the GitLab Container registry
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_IP "docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY"
+     # SSH into the deployment server, pull the image from the registry
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_IP "docker pull $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+    # SSH into the deployment server, remove the existing container (if it exists)
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_IP "docker container rm -f $CONTAINER_NAME || true"
+    # SSH into the deployment server, run the new container
+    - ssh -i $ID_RSA -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_IP "docker run -d -p $DEPLOY_PORT_HOST:$DEPLOY_PORT_CONT --restart=unless-stopped --name $CONTAINER_NAME $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+  rules:
+    # Rule: Run this job only for dev branch
+    - if: $CI_COMMIT_BRANCH == "dev"
